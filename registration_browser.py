@@ -1,5 +1,6 @@
 """管理主注册浏览器生命周期并实现注册页面自动化操作。"""
 import gc
+import os
 import random
 import re
 import secrets
@@ -918,6 +919,9 @@ def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None
     form_filled_once = False
     wait_cf_since = None
     last_cf_retry_at = 0.0
+    # 一旦出现过 Cloudflare/Turnstile，禁止在 token 为空时提交（否则号能出 SSO 但 OAuth 易 Access denied）
+    cf_required = False
+    min_cf_wait_sec = float(os.environ.get("GROK_MIN_TURNSTILE_WAIT_SEC", "8") or "8")
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -1000,6 +1004,7 @@ return 'filled-no-submit';
 
             if isinstance(filled, str) and filled.startswith("wait-cloudflare"):
                 form_filled_once = True
+                cf_required = True
                 if log_callback:
                     token_len = filled.split(":", 1)[1] if ":" in filled else "0"
                     log_callback(f"[*] 资料已填写，等待 Cloudflare 人机验证通过... 当前token长度={token_len}")
@@ -1097,6 +1102,7 @@ return 'submitted';
         )
 
         if isinstance(submit_state, str) and submit_state.startswith("wait-cloudflare"):
+            cf_required = True
             if log_callback:
                 token_len = submit_state.split(":", 1)[1] if ":" in submit_state else "0"
                 log_callback(f"[*] 等待 Cloudflare 人机验证通过后再提交... 当前token长度={token_len}")
@@ -1133,6 +1139,32 @@ return String(cfInput.value || '').trim().length;
             continue
 
         if submit_state == "submitted":
+            # 曾出现 Turnstile 却在 token 未就绪时点了提交 → 账号低信任，OAuth 易 Access denied
+            if cf_required:
+                token_len = page.run_js(
+                    """
+const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
+return String((cfInput && cfInput.value) || '').trim().length;
+                    """
+                )
+                try:
+                    token_len = int(token_len or 0)
+                except Exception:
+                    token_len = 0
+                waited = 0.0 if wait_cf_since is None else (time.time() - wait_cf_since)
+                if token_len < 80 and waited < max(min_cf_wait_sec, 5.0):
+                    if log_callback:
+                        log_callback(
+                            f"[!] 提交时 Turnstile 仍不足 (len={token_len})，继续等待人机验证..."
+                        )
+                    sleep_with_cancel(1.0, cancel_callback)
+                    continue
+                if token_len < 80:
+                    if log_callback:
+                        log_callback(
+                            f"[!] 警告: 在 Turnstile token 不足 (len={token_len}) 时完成注册；"
+                            "该账号 OAuth 可能 Access denied"
+                        )
             if log_callback:
                 log_callback(f"[*] 已填写注册资料并提交: {given_name} {family_name}")
             return {"given_name": given_name, "family_name": family_name, "password": password}

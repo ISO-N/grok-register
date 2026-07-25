@@ -523,13 +523,51 @@ def approve_device_code(
             if _dismiss_cookie_banner(page, logger):
                 _sleep(0.6)
                 continue
-        if (
+
+        # 设备码输入页优先：必须先 继续，不能因文案含 "Grok Build" 误当 consent 直接 allow
+        on_device_entry = (
+            page.ele("css:input[name='user_code']", timeout=0.3)
+            and "/consent" not in url
+            and "/device/done" not in url
+        )
+        if on_device_entry:
+            phase = "device"
+            if user_code:
+                try:
+                    user_code_input = page.ele("css:input[name='user_code']")
+                    current = (user_code_input.value or "") if user_code_input else ""
+                    if user_code.replace("-", "") not in current.replace("-", ""):
+                        user_code_input.clear()
+                        user_code_input.input(user_code)
+                        logger("filled user_code")
+                except Exception:
+                    pass
+            if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
+                _sleep(2.0)
+                continue
+            try:
+                submit = page.ele("css:button[type='submit']", timeout=0.5)
+                if submit:
+                    submit.click(by_js=True)
+                    logger("clicked device submit")
+                    _sleep(2.0)
+                    continue
+            except Exception:
+                pass
+            _sleep(0.8)
+            continue
+
+        # 仅真正的 consent 页才写 action=allow 并提交（避免设备码页误提交）
+        on_consent = (
             "/consent" in url
             or "授权 Grok" in text
             or "Authorize Grok" in text
-            or "Grok Build" in text
-            or page.ele("css:input[name='action']", timeout=0.2)
-        ):
+            or (
+                page.ele("css:input[name='action']", timeout=0.2)
+                and any(label in text for label in ALLOW_LABELS)
+            )
+        )
+        if on_consent:
             phase = "consent"
             if _cookie_banner_visible(_visible_text(page)):
                 _dismiss_cookie_banner(page, logger)
@@ -560,30 +598,6 @@ def approve_device_code(
                 raise BrowserConfirmError("auth failed: consent allow submit failed")
             _sleep(1.0)
             continue
-        if page.ele("css:input[name='user_code']", timeout=0.3) and "consent" not in url:
-            phase = "device"
-            if user_code:
-                try:
-                    user_code_input = page.ele("css:input[name='user_code']")
-                    current = (user_code_input.value or "") if user_code_input else ""
-                    if user_code.replace("-", "") not in current.replace("-", ""):
-                        user_code_input.clear()
-                        user_code_input.input(user_code)
-                        logger("filled user_code")
-                except Exception:
-                    pass
-            if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
-                _sleep(2.0)
-                continue
-            try:
-                submit = page.ele("css:button[type='submit']", timeout=0.5)
-                if submit:
-                    submit.click(by_js=True)
-                    logger("clicked device submit")
-                    _sleep(2.0)
-                    continue
-            except Exception:
-                pass
         if "正在重定向" in text or ("/account" in url and "sign-in" not in url):
             if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
                 _sleep(2.0)
@@ -646,11 +660,6 @@ def approve_device_code(
                     message = "%s shot=%s" % (message, shot)
                 raise BrowserConfirmError("auth failed: %s" % message)
             continue
-        # 部分页面仅展示允许按钮而无 /consent 路径
-        if any(label in text for label in ("允许", "Allow", "Authorize", "Approve", "授权")):
-            if _submit_device_allow(page, logger):
-                _sleep(2.5)
-                continue
         _sleep(1.0)
 
     if stop_event is not None and stop_event.is_set():
@@ -689,12 +698,16 @@ def _prepare_work_page(
         injected = inject_cookies(work_page, cookies, log=logger)
         logger("cookie inject count=%s" % injected)
         try:
-            work_page.get("https://accounts.x.ai/")
-            _sleep(1.0)
-            logger(
-                "post-inject session url=%s visible=%s"
-                % (_page_url(work_page)[:120], _norm(_visible_text(work_page))[:120])
-            )
+            # 只走 accounts.x.ai，避免 grok.com Cloudflare 挑战污染会话观感
+            work_page.get("https://accounts.x.ai/account")
+            _sleep(1.2)
+            url = _page_url(work_page)
+            visible = _norm(_visible_text(work_page))
+            logger("post-inject session url=%s visible=%s" % (url[:120], visible[:120]))
+            if "sign-in" in url or "sign-up" in url:
+                logger("post-inject warning: not logged in after cookie inject")
+            if "安全验证" in visible or "just a moment" in visible.lower() or "cloudflare" in visible.lower():
+                logger("post-inject warning: challenge page after cookie inject")
         except Exception as exc:
             logger("post-inject check: %s" % exc)
     return own_browser, work_page, owned
