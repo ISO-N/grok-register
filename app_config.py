@@ -47,6 +47,10 @@ DEFAULT_CONFIG = {
     "cpa_force_standalone": True,
     "cpa_mint_timeout_sec": 300,
     "cpa_mint_cookie_inject": True,
+    "cpa_mint_mode": "browser",
+    "cpa_oauth_settle_sec": 12,
+    "cpa_oauth_warmup": True,
+    "cpa_http_max_retries": 5,
     "cpa_oidc_request_timeout_sec": 15,
     "cpa_oidc_poll_timeout_sec": 15,
     "grok2api_allow_legacy_full_save": False,
@@ -99,7 +103,7 @@ def validate_config_structure(raw):
         "enable_nsfw", "grok2api_auto_add_local", "grok2api_auto_add_remote",
         "grok2api_allow_legacy_full_save", "cpa_export_enabled",
         "cpa_copy_to_hotload", "cpa_headless", "cpa_force_standalone",
-        "cpa_mint_cookie_inject",
+        "cpa_mint_cookie_inject", "cpa_oauth_warmup",
     )
     for key in bool_keys:
         cfg[key] = _require_bool(cfg, key)
@@ -108,6 +112,8 @@ def validate_config_structure(raw):
     cfg["proxy_ping_max_tries"] = _require_int(cfg, "proxy_ping_max_tries", 0, 100000)
     cfg["mihomo_ping_timeout_ms"] = _require_int(cfg, "mihomo_ping_timeout_ms", 500, 60000)
     cfg["cpa_mint_timeout_sec"] = _require_int(cfg, "cpa_mint_timeout_sec", 30, 1800)
+    cfg["cpa_oauth_settle_sec"] = _require_int(cfg, "cpa_oauth_settle_sec", 0, 300)
+    cfg["cpa_http_max_retries"] = _require_int(cfg, "cpa_http_max_retries", 1, 20)
     cfg["cpa_oidc_request_timeout_sec"] = _require_int(cfg, "cpa_oidc_request_timeout_sec", 3, 120)
     cfg["cpa_oidc_poll_timeout_sec"] = _require_int(cfg, "cpa_oidc_poll_timeout_sec", 3, 120)
     string_keys = tuple(key for key, value in DEFAULT_CONFIG.items() if isinstance(value, str))
@@ -118,6 +124,7 @@ def validate_config_structure(raw):
         "email_provider": {"duckmail", "yyds", "cloudflare", "cloudmail"},
         "cloudflare_auth_mode": {"query-key", "bearer", "x-api-key", "x-admin-auth", "none"},
         "grok2api_pool_name": {"ssoBasic", "ssoSuper"},
+        "cpa_mint_mode": {"browser", "http", "browser_then_http"},
     }
     for key, allowed in enums.items():
         value = cfg.get(key, DEFAULT_CONFIG.get(key, ""))
