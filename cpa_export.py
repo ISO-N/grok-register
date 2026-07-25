@@ -27,6 +27,10 @@ class CpaExportSettings:
     force_standalone: bool
     cookie_inject: bool
     tools_dir: str
+    mint_mode: str
+    settle_sec: float
+    oauth_warmup: bool
+    http_max_retries: int
 
     @classmethod
     def from_config(cls, config):
@@ -38,6 +42,18 @@ class CpaExportSettings:
         hotload_dir = Path(hotload_value).expanduser() if hotload_value else None
         if hotload_dir is not None and not hotload_dir.is_absolute():
             hotload_dir = (_ROOT / hotload_dir).resolve()
+        mode = str(cfg.get("cpa_mint_mode") or "browser").strip().lower() or "browser"
+        if mode not in ("browser", "http", "browser_then_http"):
+            mode = "browser"
+        settle_raw = cfg.get("cpa_oauth_settle_sec", None)
+        if settle_raw is None or settle_raw == "":
+            # 兼容环境变量 GROK_OAUTH_SETTLE_SEC（由 session_warmup 解析）
+            settle_sec = None
+        else:
+            try:
+                settle_sec = max(float(settle_raw), 0.0)
+            except (TypeError, ValueError):
+                settle_sec = None
         return cls(
             enabled=bool(cfg.get("cpa_export_enabled", True)),
             auth_dir=auth_dir,
@@ -52,6 +68,10 @@ class CpaExportSettings:
             force_standalone=bool(cfg.get("cpa_force_standalone", True)),
             cookie_inject=bool(cfg.get("cpa_mint_cookie_inject", True)),
             tools_dir=str(cfg.get("api_reverse_tools") or "").strip(),
+            mint_mode=mode,
+            settle_sec=settle_sec if settle_sec is not None else -1.0,
+            oauth_warmup=bool(cfg.get("cpa_oauth_warmup", True)),
+            http_max_retries=int(cfg.get("cpa_http_max_retries") or 5),
         )
 
 
@@ -149,7 +169,11 @@ def export_cpa_xai_for_account(email, password, page=None, cookies=None, sso=Non
         use_cookies = base
 
     settings.auth_dir.mkdir(parents=True, exist_ok=True)
-    log("[cpa] mint OIDC for %s -> %s" % (email, settings.auth_dir))
+    log(
+        "[cpa] mint OIDC for %s -> %s (mode=%s)"
+        % (email, settings.auth_dir, settings.mint_mode)
+    )
+    settle_arg = None if settings.settle_sec < 0 else settings.settle_sec
     result = mint_and_export(
         email=email, password=password, auth_dir=settings.auth_dir,
         page=None if settings.force_standalone else page,
@@ -160,6 +184,11 @@ def export_cpa_xai_for_account(email, password, page=None, cookies=None, sso=Non
         log=lambda message: log("[cpa] %s" % message), cancel=cancel_callback,
         request_timeout_sec=settings.request_timeout,
         poll_timeout_sec=settings.poll_timeout,
+        sso=str(sso or "").strip() or None,
+        mint_mode=settings.mint_mode,
+        settle_sec=settle_arg,
+        oauth_warmup=settings.oauth_warmup,
+        http_max_retries=settings.http_max_retries,
     )
     result = _normalize_result(result, email)
     if result.get("ok") and result.get("path") and settings.copy_to_hotload and settings.hotload_dir:
