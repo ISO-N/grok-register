@@ -58,7 +58,10 @@ class MihomoSettings:
 
 
 class MihomoClient:
-    """最小 mihomo external-controller HTTP 客户端（始终直连，不走业务代理）。"""
+    """最小 mihomo external-controller HTTP 客户端（始终直连，不走业务/系统代理）。"""
+
+    # 控制器 API 必须直连；业务 proxy / 系统代理失效时否则会出现 Connection refused。
+    _direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def __init__(self, api_base: str, api_secret: str = "", timeout: float = 15.0):
         self.api_base = str(api_base or "").rstrip("/")
@@ -91,7 +94,7 @@ class MihomoClient:
             data = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._direct_opener.open(request, timeout=self.timeout) as response:
                 raw = response.read()
                 if not raw:
                     return None
