@@ -29,6 +29,8 @@ class RegistrationOperations:
     sleep: Callable[[float], None]
     cancelled_exception: type
     retry_exception: type
+    # 成功保存账号后可选调用；返回 False 表示切换失败，应停止批次。
+    rotate_proxy_after_success: Optional[Callable[[], bool]] = None
 
 
 @dataclass
@@ -278,6 +280,23 @@ def run_batch(count, callbacks, observer, ops, enable_nsfw=True, cleanup_interva
                             f"已成功 {result.success_count} 个账号，执行定期清理",
                         )
                         last_cleanup_success_count = result.success_count
+                    if (
+                        continue_batch
+                        and not result.cancelled
+                        and result.processed_count < settings.count
+                        and callable(getattr(ops, "rotate_proxy_after_success", None))
+                    ):
+                        try:
+                            rotated = ops.rotate_proxy_after_success()
+                        except Exception as exc:
+                            callbacks.log(f"[!] 代理轮询切换异常，停止后续注册: {exc}")
+                            continue_batch = False
+                            result.cancelled = True
+                        else:
+                            if rotated is False:
+                                callbacks.log("[!] 代理轮询切换失败，停止后续注册")
+                                continue_batch = False
+                                result.cancelled = True
                 else:
                     result.fail_count += 1
                     result.registered_unsaved_count += 1

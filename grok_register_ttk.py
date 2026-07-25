@@ -633,9 +633,48 @@ def retry_pending_file(pending_path, output_path=None, log_callback=None):
     return _retry_pending_file(pending_path, output_path=output_path, log_callback=log_callback)
 
 
+def _build_proxy_rotate_callback(log_callback, cancel_callback):
+    """根据配置构建成功注册后的 mihomo 代理轮询回调。"""
+    from mihomo_proxy import MihomoProxyError, build_rotator_from_config
+
+    rotator = build_rotator_from_config(
+        config,
+        sleep=lambda seconds: sleep_with_cancel(seconds, cancel_callback),
+    )
+    if rotator is None:
+        return None
+
+    settings = rotator.settings
+    log_callback(
+        "[*] 已启用 mihomo 代理轮询: 每 %s 个成功账号切换一次 | ping 上限=%s | 组=%s | API=%s"
+        % (
+            settings.switch_every,
+            "无限(直到恢复)" if settings.ping_max_tries <= 0 else settings.ping_max_tries,
+            settings.proxy_group,
+            settings.api_base,
+        )
+    )
+
+    def rotate_proxy_after_success():
+        try:
+            node = rotator.maybe_rotate_after_success(
+                log=log_callback,
+                cancelled=cancel_callback,
+            )
+            if node:
+                log_callback("[*] 代理已切换，下一账号将使用新节点: %s" % node)
+            return True
+        except MihomoProxyError as exc:
+            log_callback("[!] mihomo 代理轮询失败: %s" % exc)
+            return False
+
+    return rotate_proxy_after_success
+
+
 def run_registration_common(count, log_callback, cancel_callback, accounts_output_file, observer):
     from registration_flow import RegistrationCallbacks, RegistrationOperations, run_batch
     callbacks = RegistrationCallbacks(log=log_callback, cancelled=cancel_callback)
+    rotate_proxy_after_success = _build_proxy_rotate_callback(log_callback, cancel_callback)
     operations = RegistrationOperations(
         start_browser=lambda: start_browser(log_callback=log_callback),
         restart_browser=lambda: restart_browser(log_callback=log_callback),
@@ -658,6 +697,7 @@ def run_registration_common(count, log_callback, cancel_callback, accounts_outpu
         sleep=lambda seconds: sleep_with_cancel(seconds, cancel_callback),
         cancelled_exception=RegistrationCancelled,
         retry_exception=AccountRetryNeeded,
+        rotate_proxy_after_success=rotate_proxy_after_success,
     )
     return run_batch(
         count=count,
@@ -763,29 +803,82 @@ class GrokRegisterGUI:
         self.proxy_entry = tk_entry(config_frame, textvariable=self.proxy_var, width=34)
         add_field(self.proxy_entry, 1, 3)
 
-        add_label(2, 0, "DuckMail API Key:")
+        add_label(2, 0, "Mihomo API:")
+        self.mihomo_api_base_var = tk.StringVar(value=config.get("mihomo_api_base", "http://127.0.0.1:9090"))
+        self.mihomo_api_base_entry = tk_entry(config_frame, textvariable=self.mihomo_api_base_var, width=34)
+        add_field(self.mihomo_api_base_entry, 2, 1)
+
+        add_label(2, 2, "Mihomo Secret:")
+        self.mihomo_api_secret_var = tk.StringVar(value=config.get("mihomo_api_secret", ""))
+        self.mihomo_api_secret_entry = tk_entry(config_frame, textvariable=self.mihomo_api_secret_var, width=34)
+        add_field(self.mihomo_api_secret_entry, 2, 3)
+
+        add_label(3, 0, "Mihomo 代理组:")
+        self.mihomo_proxy_group_var = tk.StringVar(value=config.get("mihomo_proxy_group", ""))
+        self.mihomo_proxy_group_entry = tk_entry(config_frame, textvariable=self.mihomo_proxy_group_var, width=34)
+        add_field(self.mihomo_proxy_group_entry, 3, 1)
+
+        add_label(3, 2, "每N号切换 / Ping上限:")
+        switch_frame = tk.Frame(config_frame, bg=UI_PANEL_BG)
+        self.proxy_switch_every_var = tk.StringVar(value=str(config.get("proxy_switch_every", 0)))
+        self.proxy_switch_every_spin = tk.Spinbox(
+            switch_frame,
+            from_=0,
+            to=2500,
+            width=6,
+            textvariable=self.proxy_switch_every_var,
+            bg=UI_ENTRY_BG,
+            fg=UI_FG,
+            insertbackground=UI_FG,
+            buttonbackground=UI_BUTTON_BG,
+            disabledbackground="#2f2f2f",
+            disabledforeground=UI_MUTED_FG,
+            relief=tk.SOLID,
+        )
+        self.proxy_switch_every_spin.pack(side=tk.LEFT)
+        tk_label(switch_frame, text=" / ", bg=UI_PANEL_BG).pack(side=tk.LEFT)
+        self.proxy_ping_max_tries_var = tk.StringVar(value=str(config.get("proxy_ping_max_tries", 0)))
+        self.proxy_ping_max_tries_spin = tk.Spinbox(
+            switch_frame,
+            from_=0,
+            to=100000,
+            width=6,
+            textvariable=self.proxy_ping_max_tries_var,
+            bg=UI_ENTRY_BG,
+            fg=UI_FG,
+            insertbackground=UI_FG,
+            buttonbackground=UI_BUTTON_BG,
+            disabledbackground="#2f2f2f",
+            disabledforeground=UI_MUTED_FG,
+            relief=tk.SOLID,
+        )
+        self.proxy_ping_max_tries_spin.pack(side=tk.LEFT)
+        tk_label(switch_frame, text=" (0=不切换 / 0=持续轮询)", bg=UI_PANEL_BG, fg=UI_MUTED_FG).pack(side=tk.LEFT, padx=(6, 0))
+        add_field(switch_frame, 3, 3, sticky=tk.W)
+
+        add_label(4, 0, "DuckMail API Key:")
         self.api_key_var = tk.StringVar(value=config.get("duckmail_api_key", ""))
         self.api_key_entry = tk_entry(config_frame, textvariable=self.api_key_var, width=34)
-        add_field(self.api_key_entry, 2, 1)
+        add_field(self.api_key_entry, 4, 1)
 
-        add_label(2, 2, "Cloudflare 鉴权模式:")
+        add_label(4, 2, "Cloudflare 鉴权模式:")
         self.cloudflare_auth_mode_var = tk.StringVar(value=config.get("cloudflare_auth_mode", "none"))
         self.cloudflare_auth_mode_combo = tk_option_menu(
             config_frame, self.cloudflare_auth_mode_var, ["query-key", "bearer", "x-api-key", "x-admin-auth", "none"], width=12
         )
-        add_field(self.cloudflare_auth_mode_combo, 2, 3, sticky=tk.W)
+        add_field(self.cloudflare_auth_mode_combo, 4, 3, sticky=tk.W)
 
-        add_label(3, 0, "Cloudflare API Base:")
+        add_label(5, 0, "Cloudflare API Base:")
         self.cloudflare_api_base_var = tk.StringVar(value=config.get("cloudflare_api_base", ""))
         self.cloudflare_api_base_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_base_var, width=72)
-        add_field(self.cloudflare_api_base_entry, 3, 1, columnspan=3)
+        add_field(self.cloudflare_api_base_entry, 5, 1, columnspan=3)
 
-        add_label(4, 0, "Cloudflare API Key:")
+        add_label(6, 0, "Cloudflare API Key:")
         self.cloudflare_api_key_var = tk.StringVar(value=config.get("cloudflare_api_key", ""))
         self.cloudflare_api_key_entry = tk_entry(config_frame, textvariable=self.cloudflare_api_key_var, width=34)
-        add_field(self.cloudflare_api_key_entry, 4, 1)
+        add_field(self.cloudflare_api_key_entry, 6, 1)
 
-        add_label(4, 2, "CF 路径:")
+        add_label(6, 2, "CF 路径:")
         self.cloudflare_paths_var = tk.StringVar(
             value=",".join(
                 [
@@ -797,64 +890,64 @@ class GrokRegisterGUI:
             )
         )
         self.cloudflare_paths_entry = tk_entry(config_frame, textvariable=self.cloudflare_paths_var, width=34)
-        add_field(self.cloudflare_paths_entry, 4, 3)
+        add_field(self.cloudflare_paths_entry, 6, 3)
 
-        add_label(5, 0, "Cloud Mail API Base:")
+        add_label(7, 0, "Cloud Mail API Base:")
         self.cloudmail_api_base_var = tk.StringVar(value=config.get("cloudmail_api_base", ""))
         self.cloudmail_api_base_entry = tk_entry(config_frame, textvariable=self.cloudmail_api_base_var, width=34)
-        add_field(self.cloudmail_api_base_entry, 5, 1)
+        add_field(self.cloudmail_api_base_entry, 7, 1)
 
-        add_label(5, 2, "Cloud Mail 域名:")
+        add_label(7, 2, "Cloud Mail 域名:")
         self.cloudmail_domains_var = tk.StringVar(value=config.get("cloudmail_domains", ""))
         self.cloudmail_domains_entry = tk_entry(config_frame, textvariable=self.cloudmail_domains_var, width=34)
-        add_field(self.cloudmail_domains_entry, 5, 3)
+        add_field(self.cloudmail_domains_entry, 7, 3)
 
-        add_label(6, 0, "Cloud Mail Public Token:")
+        add_label(8, 0, "Cloud Mail Public Token:")
         self.cloudmail_public_token_var = tk.StringVar(value=config.get("cloudmail_public_token", ""))
         self.cloudmail_public_token_entry = tk_entry(config_frame, textvariable=self.cloudmail_public_token_var, width=72)
-        add_field(self.cloudmail_public_token_entry, 6, 1, columnspan=3)
+        add_field(self.cloudmail_public_token_entry, 8, 1, columnspan=3)
 
-        add_label(7, 0, "grok2api 本地入池:")
+        add_label(9, 0, "grok2api 本地入池:")
         self.grok2api_local_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_local", True)))
         self.grok2api_local_auto_check = tk_checkbutton(config_frame, variable=self.grok2api_local_auto_var)
-        add_field(self.grok2api_local_auto_check, 7, 1, sticky=tk.W)
+        add_field(self.grok2api_local_auto_check, 9, 1, sticky=tk.W)
 
-        add_label(7, 2, "grok2api 池名:")
+        add_label(9, 2, "grok2api 池名:")
         self.grok2api_pool_name_var = tk.StringVar(value=str(config.get("grok2api_pool_name", "ssoBasic")))
         self.grok2api_pool_name_combo = tk_option_menu(
             config_frame, self.grok2api_pool_name_var, ["ssoBasic", "ssoSuper"], width=12
         )
-        add_field(self.grok2api_pool_name_combo, 7, 3, sticky=tk.W)
+        add_field(self.grok2api_pool_name_combo, 9, 3, sticky=tk.W)
 
-        add_label(8, 0, "本地 token.json:")
+        add_label(10, 0, "本地 token.json:")
         self.grok2api_local_file_var = tk.StringVar(value=str(config.get("grok2api_local_token_file", "")))
         self.grok2api_local_file_entry = tk_entry(config_frame, textvariable=self.grok2api_local_file_var, width=72)
-        add_field(self.grok2api_local_file_entry, 8, 1, columnspan=3)
+        add_field(self.grok2api_local_file_entry, 10, 1, columnspan=3)
 
-        add_label(9, 0, "grok2api 远端入池:")
+        add_label(11, 0, "grok2api 远端入池:")
         self.grok2api_remote_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_remote", False)))
         self.grok2api_remote_auto_check = tk_checkbutton(config_frame, variable=self.grok2api_remote_auto_var)
-        add_field(self.grok2api_remote_auto_check, 9, 1, sticky=tk.W)
+        add_field(self.grok2api_remote_auto_check, 11, 1, sticky=tk.W)
 
-        add_label(10, 0, "grok2api 远端 Base:")
+        add_label(12, 0, "grok2api 远端 Base:")
         self.grok2api_remote_base_var = tk.StringVar(value=str(config.get("grok2api_remote_base", "")))
         self.grok2api_remote_base_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_base_var, width=72)
-        add_field(self.grok2api_remote_base_entry, 10, 1, columnspan=3)
+        add_field(self.grok2api_remote_base_entry, 12, 1, columnspan=3)
 
-        add_label(11, 0, "grok2api 远端 app_key:")
+        add_label(13, 0, "grok2api 远端 app_key:")
         self.grok2api_remote_key_var = tk.StringVar(value=str(config.get("grok2api_remote_app_key", "")))
         self.grok2api_remote_key_entry = tk_entry(config_frame, textvariable=self.grok2api_remote_key_var, width=72)
-        add_field(self.grok2api_remote_key_entry, 11, 1, columnspan=3)
+        add_field(self.grok2api_remote_key_entry, 13, 1, columnspan=3)
 
-        add_label(12, 0, "OIDC / CPA:")
+        add_label(14, 0, "OIDC / CPA:")
         self.cpa_export_var = tk.BooleanVar(value=bool(config.get("cpa_export_enabled", False)))
         self.cpa_export_check = tk_checkbutton(config_frame, text="注册成功后导出 CPA xAI OIDC", variable=self.cpa_export_var)
-        add_field(self.cpa_export_check, 12, 1, sticky=tk.W)
+        add_field(self.cpa_export_check, 14, 1, sticky=tk.W)
 
-        add_label(12, 2, "CPA 输出目录:")
+        add_label(14, 2, "CPA 输出目录:")
         self.cpa_auth_dir_var = tk.StringVar(value=str(config.get("cpa_auth_dir", "./cpa_auths")))
         self.cpa_auth_dir_entry = tk_entry(config_frame, textvariable=self.cpa_auth_dir_var, width=34)
-        add_field(self.cpa_auth_dir_entry, 12, 3)
+        add_field(self.cpa_auth_dir_entry, 14, 3)
 
         btn_frame = tk.Frame(main_frame, bg=UI_BG)
         btn_frame.grid(row=1, column=0, sticky=tk.EW, pady=(0, 6))
@@ -969,6 +1062,9 @@ class GrokRegisterGUI:
         config["email_provider"] = self.email_provider_var.get().strip() or "duckmail"
         config["enable_nsfw"] = bool(self.nsfw_var.get())
         config["proxy"] = self.proxy_var.get().strip()
+        config["mihomo_api_base"] = self.mihomo_api_base_var.get().strip() or "http://127.0.0.1:9090"
+        config["mihomo_api_secret"] = self.mihomo_api_secret_var.get().strip()
+        config["mihomo_proxy_group"] = self.mihomo_proxy_group_var.get().strip()
         config["duckmail_api_key"] = self.api_key_var.get().strip()
         config["cloudflare_api_base"] = self.cloudflare_api_base_var.get().strip()
         config["cloudflare_api_key"] = self.cloudflare_api_key_var.get().strip()
@@ -993,6 +1089,8 @@ class GrokRegisterGUI:
         try:
             count = int(self.count_var.get())
             config["register_count"] = count
+            config["proxy_switch_every"] = int(self.proxy_switch_every_var.get())
+            config["proxy_ping_max_tries"] = int(self.proxy_ping_max_tries_var.get())
             validated = validate_run_requirements(config)
             config.clear()
             config.update(validated)

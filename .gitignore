@@ -28,3 +28,7 @@ screenshots/
 
 *.pending.jsonl
 *.pending.jsonl.lock
+
+# Local VPN / subscription configs (do not commit secrets)
+ykkcloud.yaml
+mihomo-config.yaml

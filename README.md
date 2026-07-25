@@ -148,9 +148,28 @@ copy config.example.json config.json
 | --- | --- |
 | `email_provider` | `duckmail`、`yyds`、`cloudflare` 或 `cloudmail` |
 | `register_count` | 本批次目标数量，允许范围由配置校验控制 |
-| `proxy` | 主注册流程代理，可留空 |
+| `proxy` | 主注册流程代理，可留空；使用 mihomo 时通常填本地 mixed 端口，如 `http://127.0.0.1:7890` |
+| `mihomo_api_base` | mihomo 外部控制器地址，默认 `http://127.0.0.1:9090` |
+| `mihomo_api_secret` | mihomo `secret`，未设置可留空 |
+| `mihomo_proxy_group` | 需要轮询切换的代理组名称（Selector 组） |
+| `proxy_switch_every` | 每成功注册多少个账号后切换一次代理；`0` 表示不切换 |
+| `proxy_ping_max_tries` | 切换时最多 ping 多少个节点；`0` 表示持续轮询直到某个节点恢复 |
+| `mihomo_ping_url` | 节点可用性测试 URL，默认 `http://www.gstatic.com/generate_204` |
+| `mihomo_ping_timeout_ms` | 节点 delay 测试超时（毫秒） |
 | `enable_nsfw` | 注册后是否尝试开启 NSFW |
 | `user_agent` | 浏览器和请求使用的 User-Agent |
+
+### Mihomo 代理轮询
+
+适用于本机或服务器上运行 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta）的场景：
+
+1. 将 `proxy` 指向 mihomo 的 mixed/http 入站（例如 `http://127.0.0.1:7890`）。
+2. 填写 `mihomo_api_base`、可选 `mihomo_api_secret`，以及要轮换的 `mihomo_proxy_group`。
+3. 设置 `proxy_switch_every`：成功注册 N 个账号后，按组内顺序切换到下一个节点。
+4. 切换时会先 ping 下一个节点；不可用则继续试后续节点。
+5. `proxy_ping_max_tries` 用于避免死循环：大于 0 时达到上限即停止批次；为 `0` 时会持续轮询等待节点恢复。
+
+切换成功后会尝试关闭 mihomo 现有连接，下一账号重启浏览器后走新节点。
 
 ### DuckMail
 
