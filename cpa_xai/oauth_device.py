@@ -253,12 +253,34 @@ def poll_device_token(
     log=None,
     cancel=None,
     proxy=None,
+    initial_delay=None,
+    soft_invalid_grant_retries=3,
 ):
+    """轮询 device token。
+
+    initial_delay:
+        授权完成后先等待再 poll，避免刚 approve 就 invalid_grant。
+        None 时默认取 interval，夹在 2~8 秒。
+    soft_invalid_grant_retries:
+        invalid_grant 软重试次数（同 device_code），对齐 SSO Bridge 加固逻辑。
+    """
     logger = log or (lambda message: None)
     deadline = time.time() + max(int(expires_in) - 5, 30)
     sleep_seconds = max(int(interval), 1)
     net_streak = 0
     max_net_streak = 20
+    soft_invalid = 0
+    max_soft_invalid = max(int(soft_invalid_grant_retries or 0), 0)
+
+    # 授权后先 sleep 再 poll，降低刚 authorize 就 invalid_grant 的概率
+    if initial_delay is None:
+        first_wait = min(max(float(sleep_seconds), 2.0), 8.0)
+    else:
+        first_wait = max(float(initial_delay), 0.0)
+    if first_wait > 0:
+        logger("oauth poll initial delay %.1fs" % first_wait)
+        _sleep_with_cancel(first_wait, cancel)
+
     while time.time() < deadline:
         if cancel and cancel():
             raise OAuthDeviceError("cancelled")
@@ -311,7 +333,16 @@ def poll_device_token(
             logger("oauth poll: %s (sleep %ss)" % (error_code, sleep_seconds))
             _sleep_with_cancel(sleep_seconds, cancel)
             continue
-        if error_code in ("expired_token", "access_denied"):
+        if error_code == "invalid_grant" and soft_invalid < max_soft_invalid:
+            soft_invalid += 1
+            delay = sleep_seconds + soft_invalid
+            logger(
+                "oauth poll invalid_grant soft retry (%s/%s) in %ss"
+                % (soft_invalid, max_soft_invalid, delay)
+            )
+            _sleep_with_cancel(delay, cancel)
+            continue
+        if error_code in ("expired_token", "access_denied", "invalid_grant"):
             raise OAuthDeviceError("device auth failed: %s: %s" % (error_code, error_description))
         if status == 400 and error_code:
             raise OAuthDeviceError("device auth token error: %s: %s" % (error_code, error_description or payload))

@@ -62,10 +62,62 @@ class OAuthDeviceTests(unittest.TestCase):
         ]
         waits = []
         with patch.object(oauth, "_post_form", side_effect=responses), patch.object(oauth, "_sleep_with_cancel", side_effect=lambda seconds, cancel=None: waits.append(seconds)):
-            result = oauth.poll_device_token("d", "https://auth.x.ai/token", interval=1, expires_in=60)
+            result = oauth.poll_device_token(
+                "d", "https://auth.x.ai/token", interval=1, expires_in=60, initial_delay=0
+            )
         self.assertEqual(result.refresh_token, "r")
         self.assertEqual(waits, [6])
 
+    def test_invalid_grant_soft_retries_then_success(self):
+        responses = [
+            (400, {"error": "invalid_grant", "error_description": "temporary"}),
+            (400, {"error": "invalid_grant"}),
+            (200, {"access_token": "a", "refresh_token": "r"}),
+        ]
+        waits = []
+        with patch.object(oauth, "_post_form", side_effect=responses), patch.object(
+            oauth, "_sleep_with_cancel", side_effect=lambda seconds, cancel=None: waits.append(seconds)
+        ):
+            result = oauth.poll_device_token(
+                "d",
+                "https://auth.x.ai/token",
+                interval=2,
+                expires_in=60,
+                initial_delay=0,
+                soft_invalid_grant_retries=3,
+            )
+        self.assertEqual(result.access_token, "a")
+        self.assertEqual(waits, [3, 4])
+
+    def test_invalid_grant_exhausts_soft_retries(self):
+        responses = [
+            (400, {"error": "invalid_grant"}),
+            (400, {"error": "invalid_grant"}),
+        ]
+        with patch.object(oauth, "_post_form", side_effect=responses), patch.object(
+            oauth, "_sleep_with_cancel"
+        ):
+            with self.assertRaisesRegex(oauth.OAuthDeviceError, "invalid_grant"):
+                oauth.poll_device_token(
+                    "d",
+                    "https://auth.x.ai/token",
+                    interval=1,
+                    expires_in=60,
+                    initial_delay=0,
+                    soft_invalid_grant_retries=1,
+                )
+
+    def test_initial_delay_runs_before_first_poll(self):
+        waits = []
+        responses = [(200, {"access_token": "a", "refresh_token": "r"})]
+        with patch.object(oauth, "_post_form", side_effect=responses) as post, patch.object(
+            oauth, "_sleep_with_cancel", side_effect=lambda seconds, cancel=None: waits.append(seconds)
+        ):
+            oauth.poll_device_token(
+                "d", "https://auth.x.ai/token", interval=5, expires_in=60, initial_delay=3.5
+            )
+        self.assertEqual(waits, [3.5])
+        self.assertEqual(post.call_count, 1)
 
 if __name__ == "__main__":
     unittest.main()
