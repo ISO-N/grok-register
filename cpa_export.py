@@ -31,6 +31,9 @@ class CpaExportSettings:
     settle_sec: float
     oauth_warmup: bool
     http_max_retries: int
+    remote_url: str
+    management_key: str
+    poll_interval_sec: float
 
     @classmethod
     def from_config(cls, config):
@@ -43,7 +46,14 @@ class CpaExportSettings:
         if hotload_dir is not None and not hotload_dir.is_absolute():
             hotload_dir = (_ROOT / hotload_dir).resolve()
         mode = str(cfg.get("cpa_mint_mode") or "browser").strip().lower() or "browser"
-        if mode not in ("browser", "http", "browser_then_http"):
+        allowed_modes = (
+            "cpa_remote",
+            "browser",
+            "http",
+            "browser_then_http",
+            "cpa_remote_then_browser",
+        )
+        if mode not in allowed_modes:
             mode = "browser"
         settle_raw = cfg.get("cpa_oauth_settle_sec", None)
         if settle_raw is None or settle_raw == "":
@@ -72,6 +82,9 @@ class CpaExportSettings:
             settle_sec=settle_sec if settle_sec is not None else -1.0,
             oauth_warmup=bool(cfg.get("cpa_oauth_warmup", True)),
             http_max_retries=int(cfg.get("cpa_http_max_retries") or 5),
+            remote_url=str(cfg.get("cpa_remote_url") or "").strip(),
+            management_key=str(cfg.get("cpa_management_key") or "").strip(),
+            poll_interval_sec=float(cfg.get("cpa_auth_poll_interval_sec") or 2),
         )
 
 
@@ -189,8 +202,14 @@ def export_cpa_xai_for_account(email, password, page=None, cookies=None, sso=Non
         settle_sec=settle_arg,
         oauth_warmup=settings.oauth_warmup,
         http_max_retries=settings.http_max_retries,
+        cpa_remote_url=settings.remote_url,
+        cpa_management_key=settings.management_key,
+        cpa_poll_interval_sec=settings.poll_interval_sec,
     )
     result = _normalize_result(result, email)
+    # cpa_remote 成功时凭证已在 CPA 侧入库，本地 path 可为空
+    if result.get("ok") and result.get("cpa_ingested") and not result.get("path"):
+        log("[cpa] CPA remote ingest success (no local auth file required)")
     if result.get("ok") and result.get("path") and settings.copy_to_hotload and settings.hotload_dir:
         try:
             settings.hotload_dir.mkdir(parents=True, exist_ok=True)
