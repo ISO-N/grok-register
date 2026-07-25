@@ -153,11 +153,48 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+# 设备码流程按钮文案（中英文兼容）
+CONTINUE_LABELS = (
+    "继续",
+    "Continue",
+    "下一步",
+    "Next",
+    "确认",
+    "Confirm",
+)
+ALLOW_LABELS = (
+    "允许",
+    "Allow",
+    "Authorize",
+    "Approve",
+    "授权",
+    "同意",
+)
+
+
 def _find_button_exact(page: Any, label: str) -> Optional[Any]:
     try:
         return page.ele(
             "xpath://button[normalize-space()='%s'] | //*[@role='button' and normalize-space()='%s'] | //a[normalize-space()='%s'] | //input[@type='submit' and @value='%s']"
             % (label, label, label, label),
+            timeout=0.4,
+        )
+    except Exception:
+        return None
+
+
+def _find_button_contains(page: Any, label: str) -> Optional[Any]:
+    """模糊匹配按钮文案（兼容前后空白/图标节点）。"""
+    safe = str(label or "").replace("'", "")
+    if not safe:
+        return None
+    try:
+        return page.ele(
+            "xpath://button[contains(normalize-space(.), '%s')] | "
+            "//*[@role='button' and contains(normalize-space(.), '%s')] | "
+            "//a[contains(normalize-space(.), '%s')] | "
+            "//input[(@type='submit' or @type='button') and contains(@value, '%s')]"
+            % (safe, safe, safe, safe),
             timeout=0.4,
         )
     except Exception:
@@ -194,7 +231,7 @@ def _dismiss_cookie_banner(page: Any, log: LogFn) -> bool:
 
 def _click_exact(page: Any, labels, log: LogFn, real: bool = False) -> Optional[str]:
     for label in labels:
-        target = _find_button_exact(page, label)
+        target = _find_button_exact(page, label) or _find_button_contains(page, label)
         if not target:
             continue
         try:
@@ -205,11 +242,95 @@ def _click_exact(page: Any, labels, log: LogFn, real: bool = False) -> Optional[
                     target.click(by_js=True)
                 except Exception:
                     target.click()
-            log("clicked exact button: %s" % label)
+            log("clicked button: %s" % label)
             return label
         except Exception as exc:
             log("button click failed %s: %s" % (label, exc))
     return None
+
+
+def _submit_device_allow(page: Any, log: LogFn) -> bool:
+    """确认页提交 action=allow。
+
+    真正生效的是隐藏字段 input[name="action"]（不是 name="allow"）。
+    只 click 按钮可能仍是空值，导致 Invalid action。
+    """
+    try:
+        result = page.run_js(
+            """
+            const allowTexts = ['允许', 'Allow', 'Authorize', 'Approve', '授权', '同意'];
+            const forms = Array.from(document.querySelectorAll('form'));
+            const isCookieForm = (form) => {
+              const text = (form.innerText || '');
+              return text.includes('隐私偏好') || text.includes('全部允许') || /cookie/i.test(text);
+            };
+            let form = forms.find((x) => {
+              if (isCookieForm(x)) return false;
+              const text = (x.innerText || '');
+              const hasAction = !!x.querySelector('input[name="action"]');
+              return hasAction || text.includes('Grok') || text.includes('允许')
+                || text.includes('Allow') || text.includes('Authorize') || text.includes('授权');
+            }) || forms.find((x) => !isCookieForm(x)) || document.querySelector('form');
+            if (!form) return 'no_form';
+            if (isCookieForm(form)) return 'cookie_form';
+
+            // 关键：input[name=action] = allow（不是 name=allow）
+            let actionInput = form.querySelector('input[name="action"]');
+            if (!actionInput) {
+              actionInput = document.createElement('input');
+              actionInput.type = 'hidden';
+              actionInput.name = 'action';
+              form.appendChild(actionInput);
+            }
+            actionInput.value = 'allow';
+            actionInput.setAttribute('value', 'allow');
+
+            // 同步可能存在的其它命名，避免脏状态
+            form.querySelectorAll('input[name="allow"], input[name="decision"]').forEach((n) => {
+              try { n.value = 'allow'; } catch (e) {}
+            });
+
+            const button = [...form.querySelectorAll('button, input[type="submit"], [role="button"]')].find((b) => {
+              const text = ((b.innerText || b.value || b.getAttribute('aria-label') || '') + '').trim();
+              return allowTexts.some((t) => text === t || text.includes(t));
+            });
+            try {
+              if (typeof form.requestSubmit === 'function') {
+                if (button) form.requestSubmit(button);
+                else form.requestSubmit();
+              } else if (button) {
+                button.click();
+              } else {
+                form.submit();
+              }
+            } catch (e) {
+              try { form.submit(); } catch (e2) { return 'submit_error:' + String(e2); }
+            }
+            return 'submitted';
+            """
+        )
+        ok = str(result or "") == "submitted"
+        if ok:
+            log("consent submitted with action=allow")
+        else:
+            log("consent submit result: %s" % result)
+        return ok
+    except Exception as exc:
+        log("consent submit failed: %s" % exc)
+        return False
+
+
+def _is_device_done(url: str, text: str) -> bool:
+    source = text or ""
+    lower = source.lower()
+    resolved = (url or "").lower()
+    return (
+        "device/done" in resolved
+        or "设备已授权" in source
+        or "device authorized" in lower
+        or "you have authorized" in lower
+        or "authorization complete" in lower
+    )
 
 
 def _wait_turnstile(page: Any, log: LogFn, timeout_sec: float, email: str = "", raise_on_timeout: bool = False) -> bool:
@@ -319,13 +440,21 @@ def approve_device_code(
     timeout_sec: float = 240.0,
     stop_event: Optional[threading.Event] = None,
     log: Optional[LogFn] = None,
+    return_on_done: bool = False,
+    require_password: bool = True,
 ) -> None:
+    """打开 device 链接并自动 继续→允许。
+
+    return_on_done:
+        True 时看到 device/done 即返回（用于 CPA 远端轮询入库）。
+        False 时保持页面，等待外部 token poll 的 stop_event。
+    """
     logger = log or _noop_log
     if page is None:
         raise BrowserConfirmError("page is None")
     email = (email or "").strip()
     password = password or ""
-    if not email or not password:
+    if require_password and (not email or not password):
         raise BrowserConfirmError("email/password required")
     if not user_code and "user_code=" in (verification_uri_complete or ""):
         try:
@@ -343,6 +472,8 @@ def approve_device_code(
     phase = "device"
     login_attempts = 0
     last_url = ""
+    allow_attempts = 0
+    done_seen_at = 0.0
 
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
@@ -365,58 +496,69 @@ def approve_device_code(
             if shot:
                 message = "%s shot=%s" % (auth_error, shot)
             raise BrowserConfirmError("auth failed: %s" % message)
-        if "device/done" in url or "设备已授权" in text or "device authorized" in text.lower():
-            logger("device done page — waiting for token poll")
+        if _is_device_done(url, text):
+            if return_on_done:
+                logger("device authorized (done)")
+                return
+            if done_seen_at <= 0:
+                done_seen_at = time.time()
+                logger("device done page — waiting for token poll")
+            # 授权完成后再挂起一段时间，避免无 stop_event 时无限空转
+            if time.time() - done_seen_at > 90:
+                logger("device done wait exceeded — leave browser loop")
+                return
             _sleep(1.5)
             continue
-        if "Invalid action" in text:
-            page.get(verification_uri_complete)
+        if "Invalid action" in text or "invalid action" in text.lower():
+            logger("Invalid action detected — reload and resubmit with action=allow")
+            try:
+                page.get(verification_uri_complete)
+            except Exception:
+                pass
             _sleep(2.0)
             phase = "device"
+            allow_attempts = 0
             continue
         if _cookie_banner_visible(text):
             if _dismiss_cookie_banner(page, logger):
                 _sleep(0.6)
                 continue
-        if "/consent" in url or "授权 Grok Build" in text or "Authorize Grok Build" in text:
+        if (
+            "/consent" in url
+            or "授权 Grok" in text
+            or "Authorize Grok" in text
+            or "Grok Build" in text
+            or page.ele("css:input[name='action']", timeout=0.2)
+        ):
             phase = "consent"
             if _cookie_banner_visible(_visible_text(page)):
                 _dismiss_cookie_banner(page, logger)
                 _sleep(0.6)
                 continue
-            if _click_exact(page, ["允许", "Allow", "Authorize", "Approve"], logger, real=True):
+            # 禁止裸 click：必须先写 input[name=action]=allow 再提交表单
+            if _submit_device_allow(page, logger):
+                allow_attempts += 1
                 _sleep(2.5)
                 continue
+            # 兜底：仍尝试点允许按钮前，再用 JS 写 action
             try:
                 page.run_js(
                     """
-                    const forms = Array.from(document.querySelectorAll('form'));
-                    const form = forms.find((x) => {
-                      const text = (x.innerText || '');
-                      return text.includes('Grok Build') || text.includes('允许') || text.includes('Allow');
-                    }) || document.querySelector('form');
-                    if (!form) return;
-                    const formText = (form.innerText || '');
-                    if (formText.includes('隐私偏好') || formText.includes('全部允许') || /cookie/i.test(formText)) return;
-                    let actionInput = form.querySelector('input[name=action]');
-                    if (!actionInput) {
-                      actionInput = document.createElement('input');
-                      actionInput.type = 'hidden';
-                      actionInput.name = 'action';
-                      form.appendChild(actionInput);
-                    }
-                    actionInput.value = 'allow';
-                    const button = [...form.querySelectorAll('button')].find((b) => {
-                      const text = (b.innerText || '').trim();
-                      return text === '允许' || text === 'Allow' || text === 'Authorize' || text === 'Approve';
+                    document.querySelectorAll('input[name="action"]').forEach((n) => {
+                      n.value = 'allow';
+                      n.setAttribute('value', 'allow');
                     });
-                    if (button) button.click();
-                    else form.submit();
                     """
                 )
+            except Exception:
+                pass
+            if _click_exact(page, list(ALLOW_LABELS), logger, real=True):
+                allow_attempts += 1
                 _sleep(2.5)
-            except Exception as exc:
-                logger("consent fallback failed: %s" % exc)
+                continue
+            if allow_attempts >= 5:
+                raise BrowserConfirmError("auth failed: consent allow submit failed")
+            _sleep(1.0)
             continue
         if page.ele("css:input[name='user_code']", timeout=0.3) and "consent" not in url:
             phase = "device"
@@ -430,19 +572,20 @@ def approve_device_code(
                         logger("filled user_code")
                 except Exception:
                     pass
-            if _click_exact(page, ["继续", "Continue"], logger, real=False):
+            if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
                 _sleep(2.0)
                 continue
             try:
                 submit = page.ele("css:button[type='submit']", timeout=0.5)
                 if submit:
                     submit.click(by_js=True)
+                    logger("clicked device submit")
                     _sleep(2.0)
                     continue
             except Exception:
                 pass
         if "正在重定向" in text or ("/account" in url and "sign-in" not in url):
-            if _click_exact(page, ["继续", "Continue"], logger, real=False):
+            if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
                 _sleep(2.0)
                 continue
         if _cookie_banner_visible(text):
@@ -455,12 +598,16 @@ def approve_device_code(
                 continue
         if page.ele("css:input[type='email']", timeout=0.3) and not page.ele("css:input[type='password']", timeout=0.2):
             phase = "email"
+            if not email:
+                raise BrowserConfirmError("auth failed: email required on login page")
             _fill(page, "css:input[type='email']", email, logger, "email")
-            if _click_exact(page, ["下一步", "Next", "Continue", "继续"], logger, real=False):
+            if _click_exact(page, list(CONTINUE_LABELS), logger, real=False):
                 _sleep(1.8)
                 continue
         if page.ele("css:input[type='password']", timeout=0.3):
             phase = "password"
+            if not password:
+                raise BrowserConfirmError("auth failed: password required on login page")
             if login_attempts >= 3:
                 auth_error = _detect_auth_error(text, url) or "login failed after retries (still on password page)"
                 raise BrowserConfirmError("auth failed: %s" % auth_error)
@@ -499,6 +646,11 @@ def approve_device_code(
                     message = "%s shot=%s" % (message, shot)
                 raise BrowserConfirmError("auth failed: %s" % message)
             continue
+        # 部分页面仅展示允许按钮而无 /consent 路径
+        if any(label in text for label in ("允许", "Allow", "Authorize", "Approve", "授权")):
+            if _submit_device_allow(page, logger):
+                _sleep(2.5)
+                continue
         _sleep(1.0)
 
     if stop_event is not None and stop_event.is_set():
@@ -510,6 +662,42 @@ def approve_device_code(
     if phase in ("password", "email") or _is_turnstile_challenge(_visible_text(page)):
         raise BrowserConfirmError("auth failed: %s" % message)
     raise BrowserConfirmError(message)
+
+
+def _prepare_work_page(
+    page: Optional[Any],
+    proxy: Optional[str],
+    headless: bool,
+    force_standalone: bool,
+    cookies: Any,
+    reuse_browser: bool,
+    recycle_every: int,
+    logger: LogFn,
+):
+    work_page = None if force_standalone else page
+    own_browser = None
+    owned = False
+    if work_page is None:
+        own_browser, work_page, owned = acquire_mint_browser(
+            proxy=proxy,
+            headless=headless,
+            reuse=reuse_browser,
+            recycle_every=recycle_every,
+            log=logger,
+        )
+    if cookies:
+        injected = inject_cookies(work_page, cookies, log=logger)
+        logger("cookie inject count=%s" % injected)
+        try:
+            work_page.get("https://accounts.x.ai/")
+            _sleep(1.0)
+            logger(
+                "post-inject session url=%s visible=%s"
+                % (_page_url(work_page)[:120], _norm(_visible_text(work_page))[:120])
+            )
+        except Exception as exc:
+            logger("post-inject check: %s" % exc)
+    return own_browser, work_page, owned
 
 
 def mint_with_browser(
@@ -534,7 +722,6 @@ def mint_with_browser(
     logger = poll_log or _noop_log
     own_browser = None
     owned = False
-    work_page = None if force_standalone else page
     resolved = resolve_proxy(proxy)
     set_runtime_proxy(resolved or None)
     success = False
@@ -545,24 +732,20 @@ def mint_with_browser(
             cancel=cancel,
             retries=2,
         )
-        logger("device user_code=%s expires_in=%s proxy=%s" % (session.user_code, session.expires_in, proxy_log_label(resolved) or "(none)"))
-        if work_page is None:
-            own_browser, work_page, owned = acquire_mint_browser(
-                proxy=resolved or None,
-                headless=headless,
-                reuse=reuse_browser,
-                recycle_every=recycle_every,
-                log=logger,
-            )
-        if cookies:
-            injected = inject_cookies(work_page, cookies, log=logger)
-            logger("cookie inject count=%s" % injected)
-            try:
-                work_page.get("https://accounts.x.ai/")
-                _sleep(1.0)
-                logger("post-inject session url=%s visible=%s" % (_page_url(work_page)[:120], _norm(_visible_text(work_page))[:120]))
-            except Exception as exc:
-                logger("post-inject check: %s" % exc)
+        logger(
+            "device user_code=%s expires_in=%s proxy=%s"
+            % (session.user_code, session.expires_in, proxy_log_label(resolved) or "(none)")
+        )
+        own_browser, work_page, owned = _prepare_work_page(
+            page=page,
+            proxy=resolved or None,
+            headless=headless,
+            force_standalone=force_standalone,
+            cookies=cookies,
+            reuse_browser=reuse_browser,
+            recycle_every=recycle_every,
+            logger=logger,
+        )
         stop_event = threading.Event()
         token_box = {}
         error_box = {}
@@ -605,6 +788,7 @@ def mint_with_browser(
                 timeout_sec=browser_timeout_sec,
                 stop_event=stop_event,
                 log=logger,
+                return_on_done=False,
             )
         except BrowserConfirmError as exc:
             lower = str(exc).lower()
@@ -644,6 +828,107 @@ def mint_with_browser(
         if "err" in error_box:
             raise error_box["err"]
         raise OAuthDeviceError("token poll thread ended without result")
+    finally:
+        if own_browser is not None:
+            if owned:
+                close_standalone(own_browser)
+            else:
+                release_mint_browser(owned=False, success=success, log=logger)
+
+
+def mint_via_cpa_remote(
+    email: str,
+    password: str,
+    remote_url: str,
+    management_key: str,
+    page: Optional[Any] = None,
+    proxy: Optional[str] = None,
+    headless: bool = False,
+    browser_timeout_sec: float = 240.0,
+    poll_log: Optional[LogFn] = None,
+    cancel: Optional[Callable[[], bool]] = None,
+    force_standalone: bool = True,
+    cookies: Any = None,
+    reuse_browser: bool = True,
+    recycle_every: int = 15,
+    request_timeout_sec: float = 15.0,
+    poll_interval_sec: float = 2.0,
+):
+    """走 CPA 管理端 Device Flow 并等待入库。
+
+    1) GET /v0/management/xai-auth-url
+    2) 浏览器打开 url，自动 继续→允许（action=allow）
+    3) 轮询 GET /v0/management/get-auth-status 直到成功
+    """
+    from .cpa_management import CpaManagementError, poll_auth_status, request_xai_auth_url
+    from .proxyutil import resolve_proxy, set_runtime_proxy
+
+    logger = poll_log or _noop_log
+    email = (email or "").strip()
+    password = password or ""
+    has_cookies = bool(cookies)
+    if not email and not has_cookies:
+        raise BrowserConfirmError("email required for cpa_remote mint")
+    if not password and not has_cookies:
+        raise BrowserConfirmError("password or cookies required for cpa_remote mint")
+
+    resolved = resolve_proxy(proxy)
+    set_runtime_proxy(resolved or None)
+    own_browser = None
+    owned = False
+    success = False
+    try:
+        auth = request_xai_auth_url(
+            remote_url=remote_url,
+            management_key=management_key,
+            timeout=float(request_timeout_sec),
+            log=logger,
+        )
+        own_browser, work_page, owned = _prepare_work_page(
+            page=page,
+            proxy=resolved or None,
+            headless=headless,
+            force_standalone=force_standalone,
+            cookies=cookies,
+            reuse_browser=reuse_browser,
+            recycle_every=recycle_every,
+            logger=logger,
+        )
+        approve_device_code(
+            work_page,
+            verification_uri_complete=auth["url"],
+            email=email,
+            password=password,
+            user_code=auth.get("user_code") or "",
+            timeout_sec=browser_timeout_sec,
+            stop_event=None,
+            log=logger,
+            return_on_done=True,
+            require_password=not has_cookies,
+        )
+        status = poll_auth_status(
+            remote_url=remote_url,
+            management_key=management_key,
+            state=auth["state"],
+            timeout_sec=max(float(browser_timeout_sec), 60.0),
+            interval_sec=float(poll_interval_sec),
+            request_timeout=float(request_timeout_sec),
+            log=logger,
+            cancel=cancel,
+        )
+        success = True
+        return {
+            "ok": True,
+            "email": email,
+            "state": auth["state"],
+            "user_code": auth.get("user_code") or "",
+            "auth_url": auth["url"],
+            "cpa_ingested": True,
+            "status": status.get("status") or "ok",
+            "mint_mode": "cpa_remote",
+        }
+    except CpaManagementError:
+        raise
     finally:
         if own_browser is not None:
             if owned:
