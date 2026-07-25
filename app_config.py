@@ -20,6 +20,13 @@ DEFAULT_CONFIG = {
     "cloudmail_domains": "",
     "cloudmail_path_messages": "/api/public/emailList",
     "proxy": "",
+    "mihomo_api_base": "http://127.0.0.1:9090",
+    "mihomo_api_secret": "",
+    "mihomo_proxy_group": "",
+    "proxy_switch_every": 0,
+    "proxy_ping_max_tries": 0,
+    "mihomo_ping_url": "http://www.gstatic.com/generate_204",
+    "mihomo_ping_timeout_ms": 5000,
     "enable_nsfw": True,
     "register_count": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -97,6 +104,9 @@ def validate_config_structure(raw):
     for key in bool_keys:
         cfg[key] = _require_bool(cfg, key)
     cfg["register_count"] = _require_int(cfg, "register_count", 1, 2500)
+    cfg["proxy_switch_every"] = _require_int(cfg, "proxy_switch_every", 0, 2500)
+    cfg["proxy_ping_max_tries"] = _require_int(cfg, "proxy_ping_max_tries", 0, 100000)
+    cfg["mihomo_ping_timeout_ms"] = _require_int(cfg, "mihomo_ping_timeout_ms", 500, 60000)
     cfg["cpa_mint_timeout_sec"] = _require_int(cfg, "cpa_mint_timeout_sec", 30, 1800)
     cfg["cpa_oidc_request_timeout_sec"] = _require_int(cfg, "cpa_oidc_request_timeout_sec", 3, 120)
     cfg["cpa_oidc_poll_timeout_sec"] = _require_int(cfg, "cpa_oidc_poll_timeout_sec", 3, 120)
@@ -128,7 +138,8 @@ def validate_config_structure(raw):
 
     url_keys = {
         "cloudflare_api_base", "cloudmail_api_base",
-        "grok2api_remote_base", "cpa_base_url",
+        "grok2api_remote_base", "cpa_base_url", "mihomo_api_base",
+        "mihomo_ping_url",
     }
     for key in url_keys:
         value = cfg[key]
@@ -168,6 +179,11 @@ def validate_run_requirements(cfg):
             raise ConfigError("远端 token 入池缺少必需配置: " + ", ".join(missing))
     if cfg["cpa_export_enabled"] and cfg["cpa_copy_to_hotload"] and not cfg["cpa_hotload_dir"]:
         raise ConfigError("启用 CPA 热加载复制时必须配置 cpa_hotload_dir")
+    if int(cfg.get("proxy_switch_every") or 0) > 0:
+        if not cfg.get("mihomo_api_base"):
+            raise ConfigError("启用代理轮询时必须配置 mihomo_api_base")
+        if not cfg.get("mihomo_proxy_group"):
+            raise ConfigError("启用代理轮询时必须配置 mihomo_proxy_group（代理组名称）")
     return cfg
 
 
