@@ -110,10 +110,10 @@ class MihomoClient:
                 detail = str(exc.reason or "")
             raise MihomoProxyError(
                 "mihomo API %s %s 失败: HTTP %s %s"
-                % (method.upper(), path, exc.code, detail.strip() or exc.reason)
+                % (method.upper(), url, exc.code, detail.strip() or exc.reason)
             ) from exc
         except Exception as exc:
-            raise MihomoProxyError("mihomo API %s %s 失败: %s" % (method.upper(), path, exc)) from exc
+            raise MihomoProxyError("mihomo API %s %s 失败: %s" % (method.upper(), url, exc)) from exc
 
     def get_proxy(self, name: str) -> Dict[str, Any]:
         encoded = urllib.parse.quote(str(name), safe="")
