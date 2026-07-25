@@ -110,6 +110,21 @@ class ConsentSubmitHelpersTests(unittest.TestCase):
         self.assertTrue(bc._is_device_done("https://x", "Device authorized"))
         self.assertFalse(bc._is_device_done("https://x/consent", "Allow"))
 
+    def test_device_entry_page_must_not_match_consent_by_grok_build_alone(self):
+        """设备码页文案含 Grok Build，不能因此当成 consent 直接 allow。"""
+        device_text = (
+            "退出登录 登录 Grok Build 输入终端中显示的代码。 仅当您刚刚从设备发起登录时才输入此代码。 继续"
+        )
+        self.assertIn("Grok Build", device_text)
+        self.assertNotIn("/consent", "https://accounts.x.ai/oauth2/device?user_code=X")
+        # 新逻辑：consent 需 /consent 或 授权文案/允许按钮，而不是仅 Grok Build
+        on_consent = (
+            "/consent" in "https://accounts.x.ai/oauth2/device?user_code=X"
+            or "授权 Grok" in device_text
+            or "Authorize Grok" in device_text
+        )
+        self.assertFalse(on_consent)
+
     def test_submit_device_allow_sets_action(self):
         class Page:
             def __init__(self):
