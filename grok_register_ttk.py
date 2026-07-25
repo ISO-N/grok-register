@@ -949,6 +949,26 @@ class GrokRegisterGUI:
         self.cpa_auth_dir_entry = tk_entry(config_frame, textvariable=self.cpa_auth_dir_var, width=34)
         add_field(self.cpa_auth_dir_entry, 14, 3)
 
+        add_label(15, 0, "CPA 远端 URL:")
+        self.cpa_remote_url_var = tk.StringVar(value=str(config.get("cpa_remote_url", "")))
+        self.cpa_remote_url_entry = tk_entry(config_frame, textvariable=self.cpa_remote_url_var, width=34)
+        add_field(self.cpa_remote_url_entry, 15, 1)
+        add_label(15, 2, "管理密钥:")
+        self.cpa_management_key_var = tk.StringVar(value=str(config.get("cpa_management_key", "")))
+        self.cpa_management_key_entry = tk_entry(config_frame, textvariable=self.cpa_management_key_var, width=34, show="*")
+        add_field(self.cpa_management_key_entry, 15, 3)
+
+        add_label(16, 0, "CPA mint 模式:")
+        self.cpa_mint_mode_var = tk.StringVar(value=str(config.get("cpa_mint_mode", "browser")))
+        self.cpa_mint_mode_combo = ttk.Combobox(
+            config_frame,
+            textvariable=self.cpa_mint_mode_var,
+            values=["browser", "cpa_remote", "cpa_remote_then_browser", "http", "browser_then_http"],
+            width=22,
+            state="readonly",
+        )
+        add_field(self.cpa_mint_mode_combo, 16, 1, sticky=tk.W)
+
         btn_frame = tk.Frame(main_frame, bg=UI_BG)
         btn_frame.grid(row=1, column=0, sticky=tk.EW, pady=(0, 6))
         self.start_btn = tk_button(btn_frame, text="开始注册", command=self.start_registration)
@@ -1080,6 +1100,9 @@ class GrokRegisterGUI:
         config["grok2api_remote_app_key"] = self.grok2api_remote_key_var.get().strip()
         config["cpa_export_enabled"] = bool(self.cpa_export_var.get())
         config["cpa_auth_dir"] = self.cpa_auth_dir_var.get().strip() or "./cpa_auths"
+        config["cpa_remote_url"] = self.cpa_remote_url_var.get().strip()
+        config["cpa_management_key"] = self.cpa_management_key_var.get().strip()
+        config["cpa_mint_mode"] = self.cpa_mint_mode_var.get().strip() or "browser"
         raw_paths = [x.strip() for x in self.cloudflare_paths_var.get().split(",") if x.strip()]
         if len(raw_paths) >= 4:
             config["cloudflare_path_domains"] = raw_paths[0] if raw_paths[0].startswith("/") else ("/" + raw_paths[0])
